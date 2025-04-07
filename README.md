@@ -83,16 +83,19 @@ sh install.sh
 ## Experiment on CALVIN
 
 ### :ballot_box_with_check: Relevant Files:
-- #### Training
+> #### Training
 - vla-scripts/
   - ```train_generalist_calvin.py```: Train OpenVLA on CALVIN dataset
   - ```train_specialist_calvin.py```: Train DiT specialist with pre-trained generalist
 - prismatic/vla/datasets/
   - ```calvin_dataset.py```: Data loader for CALVIN dataset
-- #### Evaluation
+> #### Evaluation
 - vla-scripts/
   - ```evaluate_calvin.py```: Initiate evaluation on CALVIN
   - ```dual_sys_evaluation.py```: RoboDual-specific core implementation
+> #### Model
+- prismatic/models/policy/:
+  - ```diffusion_policy.py```: Core implementation of our DiT action expert
 
 
 ### :one: Generalist Training
