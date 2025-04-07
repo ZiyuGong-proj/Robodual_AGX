@@ -29,10 +29,18 @@ The official implementation of our paper: \
 - **[Auto-regressive Generalist + DIffusion Action Specialist**] We introduce a novel approach that integrates generalist and specialist policies into a synergistic framework, dubbed :gemini:RoboDual, following a **dual-system** spirit.
 - **[Decoupled Training & Input]** The framework facilitates the flexible integration of diverse modalities and allows for the deconstruction of the two models on the aspect of training data, thereby enhancing their individual strengths and capabilities.
 
+### Current Endeavors on Dual-systems
+
+The trend of dual-systems for robotics is shown below. In particular, *Asynchronous* implementations include:
+- [Helix](https://www.figure.ai/news/helix) from Figure
+- [HiRT](https://arxiv.org/pdf/2410.05273)
+
+TODO.
 
 ## :loudspeaker: News
 
-- **[2024/10/11]** We released our paper on [arXiv](https://arxiv.org/abs/2410.08001).
+- **[2025/04]** We publicly release the codes.
+- **[2024/10]** We released our paper on [arXiv](https://arxiv.org/abs/2410.08001).
 
 
 ## :pushpin: TODO list
@@ -40,7 +48,7 @@ The official implementation of our paper: \
 - [ ] Release checkpoints for reproduction (*Scheduled Release Date*: **Mid-April, 2025**)
 
 
-## :video_game: Getting started <a name="installation"></a>
+## :video_game: Getting Started <a name="installation"></a>
 
 1. (Optional) We use conda to manage the environment.
 
@@ -140,10 +148,10 @@ If you find our code or models useful in your work, please cite [our paper](http
 
 ```bibtex
 @article{bu2024robodual,
-      title={Towards Synergistic, Generalized, and Efficient Dual-System for Robotic Manipulation}, 
-      author={Qingwen Bu and Hongyang Li and Li Chen and Jisong Cai and Jia Zeng and Heming Cui and Maoqing Yao and Yu Qiao},
-      journal = {arXiv preprint arXiv:2410.08001},
-      year={2024},
+  title={Towards Synergistic, Generalized, and Efficient Dual-System for Robotic Manipulation}, 
+  author={Qingwen Bu and Hongyang Li and Li Chen and Jisong Cai and Jia Zeng and Heming Cui and Maoqing Yao and Yu Qiao},
+  journal={arXiv preprint arXiv:2410.08001},
+  year={2024}
 }
 ```
 
