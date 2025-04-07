@@ -20,9 +20,15 @@ The official implementation of our paper: \
 
 ## :fire: Highlight
 
-- We introduce a novel approach that integrates generalist and specialist policies into a synergistic framework, dubbed :gemini:RoboDual, following a dual-system spirit.
-- The framework facilitates the flexible integration of diverse modalities and allows for the deconstruction of the two models on the aspect of training data, thereby enhancing their individual strengths and capabilities.
-- -We demonstrate that the dual-system approach surpasses both specialist- and generalist-only models in various task
+<div id="top" align="center">
+<p align="center">
+<img src="assets/model_arch.png" width="1000px" >
+</p>
+</div>
+
+- **[Auto-regressive Generalist + DIffusion Action Specialist**] We introduce a novel approach that integrates generalist and specialist policies into a synergistic framework, dubbed :gemini:RoboDual, following a **dual-system** spirit.
+- **[Decoupled Training & Input]** The framework facilitates the flexible integration of diverse modalities and allows for the deconstruction of the two models on the aspect of training data, thereby enhancing their individual strengths and capabilities.
+
 
 ## :loudspeaker: News
 
