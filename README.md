@@ -33,9 +33,21 @@ The official implementation of our paper: \
 
 The trend of dual-systems for robotics is shown below. In particular, *Asynchronous* implementations include:
 - [Helix](https://www.figure.ai/news/helix) from Figure
-- [HiRT](https://arxiv.org/pdf/2410.05273)
+- [HiRT](https://arxiv.org/pdf/2410.05273) from THU
+- [LCB](https://arxiv.org/pdf/2405.04798) from UCBerkeley
+- **RoboDual** (This work)
 
-TODO.
+<div id="top" align="center">
+<p align="center">
+<img src="assets/dual_system_timeline.png" width="1000px" >
+</p>
+</div>
+
+> - Following RoboDual, the architecture of dual-systems in robotics converges to the 'VLM + Diffusion Transformer' paradigm.
+> - Asynchronous inference with dual-system allows a more *decoupled* design and enables more flexible and scalable reasoning.
+> - Beyond latents, explicit representations (*e.g.,* coarse action output from the System-2 as in RoboDual) should also be explored!
+
+
 
 ## :loudspeaker: News
 
