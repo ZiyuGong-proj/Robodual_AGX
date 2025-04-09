@@ -11,11 +11,11 @@ The official implementation of our paper: \
 > Our objective is to develop a synergistic dual-system framework which supplements the generalizability of large-scale pre-trained generalist with the efficient and task-specific adaptation of specialist. (a) The fast specialist policy obsesses real-time and accurate control by aid of the slow yet generalized outcome from the generalist one with large-scale data. (b) RoboDual exhibits significant improvement in terms of performance and efficiency over a single standalone option and surpasses previous state-of-the-arts in the real-robot setting.
 
 
-> [Qingwen Bu](https://scholar.google.com/citations?user=-JCRysgAAAAJ&hl=zh-CN&oi=ao), Hongyang Li, Li Chen, Jisong Cai, Jia Zeng, Heming Cui, Maoqing Yao, Yu Qiao
+> [Qingwen Bu](https://scholar.google.com/citations?user=-JCRysgAAAAJ&hl=zh-CN&oi=ao), [Li Chen](https://ilnehc.github.io/), _et al._
 
-> #### 📝[Paper](https://arxiv.org/pdf/2410.08001) | 🌍[Project Page](https://opendrivelab.com/RoboDual/)
+> #### 📝 [Paper](https://arxiv.org/pdf/2410.08001) | 🌍 [Project Page](https://opendrivelab.com/RoboDual/)
 
-> :mailbox_with_mail: If you have any questions, please feel free to contact: *Qingwen Bu* ( qwbu01@sjtu.edu.cn )
+> :mailbox_with_mail: Point of contact: *Qingwen Bu* ( qingwen@opendrivelab.com ) or *Li Chen* ( ilnehc@opendrivelab.com )
 
 
 ## :fire: Highlight
@@ -33,8 +33,8 @@ The official implementation of our paper: \
 
 The trend of dual-systems for robotics is shown below. In particular, *Asynchronous* implementations include:
 - [Helix](https://www.figure.ai/news/helix) from Figure
-- [HiRT](https://arxiv.org/pdf/2410.05273) from THU
-- [LCB](https://arxiv.org/pdf/2405.04798) from UCBerkeley
+- [HiRT](https://arxiv.org/pdf/2410.05273) from Tsinghua
+- [LCB](https://arxiv.org/pdf/2405.04798) from UC Berkeley
 - **RoboDual** (This work)
 
 <div id="top" align="center">
