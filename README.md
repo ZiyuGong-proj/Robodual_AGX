@@ -51,7 +51,7 @@ The trend of dual-systems for robotics is shown below. In particular, *Asynchron
 
 ## :loudspeaker: News
 
-- **[2025/04]** We publicly release the codes.
+- **[2025/04]** Code of RoboDual released. Check it out!
 - **[2024/10]** We released our paper on [arXiv](https://arxiv.org/abs/2410.08001).
 
 
