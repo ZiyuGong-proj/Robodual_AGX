@@ -85,7 +85,7 @@ class DualSystem(torch.nn.Module):
             continuous_actions_pred.append(torch.tensor(self.action_tokenizer.decode_token_ids_to_actions(action_preds[b, mask[b]].cpu().numpy())))
         continuous_actions_pred = torch.stack(continuous_actions_pred).to(batch['raw_action'].device)
         continuous_actions_pred = rearrange(continuous_actions_pred, 'b (f n) -> b f n', n=7)
-        
+
         ref_actions = []
         for idx, ref_action in enumerate(continuous_actions_pred):
             zero_actions = torch.zeros((8, 7))
@@ -166,7 +166,7 @@ class DualSystem(torch.nn.Module):
 @dataclass
 class FinetuneConfig:
     # fmt: off
-    vla_path: str = "openvla-7b"                                    # Path to OpenVLA model 
+    vla_path: str = "/path/to/your/pretrained_generalist_model"                                  # Path to OpenVLA model 
 
     # Directory Paths
     data_root_dir: Path = Path("datasets/calvin_abc")               # Path to CALVIN dataset directory
@@ -175,7 +175,7 @@ class FinetuneConfig:
     adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
 
     # Specialist Model Configs
-    action_chunk_size: int = 8                                      # Action chunking size (TODO:current dataloader only works for size=8)
+    action_chunk_size: int = 8                                      # Action chunking size (TODO: current dataloader only works for size=8)
     num_inference_steps: int = 5                                    # Sampling steps 
     cond_drop_chance: float = 0.1                                   # Classifier-free guidance
     with_depth: bool = True                                         # Use depth input
@@ -290,9 +290,9 @@ def finetune(cfg: FinetuneConfig) -> None:
                                         vision_encoder=cfg.vision_encoder,
                                         cond_drop_chance=cfg.cond_drop_chance,
                                         progressive_noise=False,
-                                        with_depth=args.with_depth,
-                                        with_gripper=args.with_gripper,
-                                        with_tactile=args.with_tactile,
+                                        with_depth=cfg.with_depth,
+                                        with_gripper=cfg.with_gripper,
+                                        with_tactile=cfg.with_tactile,
                                         ).to(device_id)
 
     # Dual-system wrapping
@@ -301,12 +301,11 @@ def finetune(cfg: FinetuneConfig) -> None:
     trainable_total_params = sum(p.numel() for p in dual_system.parameters() if p.requires_grad)
     print('Total Trainable Params: ', trainable_total_params)
 
-    dual_system = DDP(dual_system, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=False)
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in dual_system.parameters() if param.requires_grad]
 
-    groups = [{'params': dual_system.module.fast_system.parameters(), 'lr': 1e-4}]
+    groups = [{'params': dual_system.parameters(), 'lr': 1e-4}]
     optimizer = AdamW(groups, lr=cfg.learning_rate, weight_decay=1e-3)
 
     scheduler = torchtune.modules.get_cosine_schedule_with_warmup(

@@ -414,7 +414,7 @@ class BaseCalvinDataset(Dataset):
         self.gripper_depth_max = 2.0
         self.gripper_depth_min = 0
        
-        with open('enrich_lang_annotations.json', 'r') as f:
+        with open('vla-scripts/enrich_lang_annotations.json', 'r') as f:
             self.enrich_lang = json.load(f)
         self.text_aug = text_aug
 
@@ -478,42 +478,29 @@ class BaseCalvinDataset(Dataset):
         Returns:
             Loaded sequence.
         """
-        if isinstance(idx, int):
-            # When max_ws_size and min_ws_size are equal, avoid unnecessary padding
-            # acts like Constant dataset. Currently, used for language data
-            if self.min_window_size == self.max_window_size:
-                window_size = self.max_window_size
-            elif self.min_window_size < self.max_window_size:
-                window_size = self._get_window_size(idx)
-            else:
-                logger.error(
-                    f"min_window_size {self.min_window_size} > max_window_size {self.max_window_size}"
-                )
-                raise ValueError
-        else:
-            idx, window_size = idx
-        
 
         pred_actions = random.randint(0, self.action_chunking_size - 1)
-        sequence = self._get_sequences(idx, window_size + pred_actions, head=False)
+        sequence = self._get_sequences(idx, self.window_size + pred_actions, head=False)
 
         
         image = copy.deepcopy(sequence["rgb_obs"]["rgb_static"].numpy())
         image_vla = Image.fromarray(image[0].astype(np.uint8))
-        goal_image = Image.fromarray(image[window_size - 1].astype(np.uint8))
         pixel_values = self.image_transform(image_vla)
-        goal_pixel_values = self.image_transform(goal_image)
 
-
+        # third-view RGB (we load consecutive two frames)
         image_dp = Image.fromarray(image[pred_actions].astype(np.uint8))
         prev_image_dp = Image.fromarray(image[pred_actions - 1 if pred_actions > 1 else pred_actions, ...])
+
+        # gripper-view RGB
         gripper_image = copy.deepcopy(sequence["rgb_obs"]["rgb_gripper"].numpy()[pred_actions])
         gripper_image = Image.fromarray(gripper_image.astype(np.uint8))
 
+        # prepare tactile and depth images
         rgb_tactile = copy.deepcopy(sequence["rgb_obs"]["rgb_tactile"].numpy()[pred_actions]) / 255
         depth_image = copy.deepcopy(sequence["depth_obs"]['depth_static'].numpy()[pred_actions]) - self.depth_min / (self.depth_max - self.depth_min)
         depth_gripper = copy.deepcopy(sequence["depth_obs"]['depth_gripper'].numpy()[pred_actions]) - self.gripper_depth_min / (self.gripper_depth_max - self.gripper_depth_min)
 
+        # apply normalization given the employed pre-trained visual encoder
         if self.imagenet_norm:
             pixel_values_dp = self.image_transform(image_dp)[:3]
             prev_pixel_values_dp = self.image_transform(prev_image_dp)[:3]
@@ -522,15 +509,9 @@ class BaseCalvinDataset(Dataset):
             pixel_values_dp = self.image_transform(image_dp)[-3:]
             prev_pixel_values_dp = self.image_transform(prev_image_dp)[-3:]
             gripper_image = self.image_transform(gripper_image)[-3:]
+            
 
-
-        ### Action normalization
-        # q01 = np.array(self.dataset_statistics['calvin']['action']['q01'])[None, :]
-        # q99 = np.array(self.dataset_statistics['calvin']['action']['q99'])[None, :]
-        # normalized_action = (sequence['rel_actions'] - q01) / (q99 - q01)
-        # normalized_action = normalized_action * 2 - 1
-
-        action = sequence['rel_actions'][:window_size] 
+        action = sequence['rel_actions'][:self.window_size] 
         tgt_action = sequence['rel_actions'][pred_actions:]
 
         his_actions = torch.zeros((4, 7))
@@ -541,19 +522,20 @@ class BaseCalvinDataset(Dataset):
         proprio = torch.tensor(sequence['robot_obs'].numpy())
         proprio = torch.cat([proprio[pred_actions, :6], proprio[pred_actions, [-1]]], dim=-1)
 
-        valid_cond_mask = torch.zeros((window_size))
-        valid_cond_mask[-(window_size - pred_actions):] = 1
+        valid_cond_mask = torch.zeros((self.window_size))
+        valid_cond_mask[-(self.window_size - pred_actions):] = 1
 
 
-        # Add instruction to VLA prompt
+        # add instruction to VLA prompt 
+        # we extend OpenVLA to predict action chunk of size 8
         prompt_builder = self.prompt_builder_fn("openvla")
         tokenized_actions = [self.action_tokenizer(act) for act in action]
         multistep_action = ""
         for idx, tokenized_action in enumerate(tokenized_actions):
             multistep_action += tokenized_action
-            if idx != window_size - 1:
+            if idx != self.window_size - 1:
                 multistep_action += ' '
-        
+
         instruction = sequence["lang"]
         conversation = [
             {"from": "human", "value": f"What action should the robot take to {instruction}?"},
@@ -570,13 +552,12 @@ class BaseCalvinDataset(Dataset):
         #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
         input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
 
-        num_action_tokens = len(action[0]) * window_size + window_size
+        num_action_tokens = len(action[0]) * self.window_size + self.window_size
         labels[: -num_action_tokens] = IGNORE_INDEX
 
         dataset_name = 'calvin'
 
         return dict(pixel_values=pixel_values, 
-                    goal_pixel_values=goal_pixel_values,
                     pixel_values_dp=pixel_values_dp, 
                     prev_pixel_values_dp=prev_pixel_values_dp,
                     depth_image=depth_image,
@@ -628,61 +609,12 @@ class BaseCalvinDataset(Dataset):
     def _load_episode(self, idx: int, window_size: int) -> Dict[str, np.ndarray]:
         raise NotImplementedError
 
-    def _get_window_size(self, idx: int) -> int:
-        """
-        Sample a window size taking into account the episode limits.
-
-        Args:
-            idx: Index of the sequence to load.
-
-        Returns:
-            Window size.
-        """
-        window_diff = self.max_window_size - self.min_window_size
-        if len(self.episode_lookup) <= idx + window_diff:
-            # last episode
-            max_window = self.min_window_size + len(self.episode_lookup) - idx - 1
-        elif (
-            self.episode_lookup[idx + window_diff]
-            != self.episode_lookup[idx] + window_diff
-        ):
-            # less than max_episode steps until next episode
-            steps_to_next_episode = int(
-                np.nonzero(
-                    self.episode_lookup[idx : idx + window_diff + 1]
-                    - (self.episode_lookup[idx] + np.arange(window_diff + 1))
-                )[0][0]
-            )
-            max_window = min(
-                self.max_window_size, (self.min_window_size + steps_to_next_episode - 1)
-            )
-        else:
-            max_window = self.max_window_size
-
-        if self.validation:
-            # in validation step, repeat the window sizes for each epoch.
-            return get_validation_window_size(idx, self.min_window_size, max_window)
-        else:
-            return np.random.randint(self.min_window_size, max_window + 1)
-
     def __len__(self) -> int:
         """
         Returns:
             Size of the dataset.
         """
         return len(self.episode_lookup)
-
-    def _get_pad_size(self, sequence: Dict) -> int:
-        """
-        Determine how many frames to append to end of the sequence
-
-        Args:
-            sequence: Loaded sequence.
-
-        Returns:
-            Number of frames to pad.
-        """
-        return self.max_window_size - len(sequence["actions"])
 
     def _pad_sequence(self, seq: Dict, pad_size: int, head: bool=False) -> Dict:
         """
