@@ -261,10 +261,10 @@ def main(args):
                                                 n_action_steps=8, 
                                                 num_inference_steps=10,
                                                 vision_encoder='DINO',
-                                                with_depth=True,
+                                                with_depth=args.with_depth,
                                                 progressive_noise=False,
-                                                with_gripper=True,
-                                                with_tactile=False,
+                                                with_gripper=args.with_gripper,
+                                                with_tactile=args.with_tactile,
                                                 cond_drop_chance=0,
                                               ).eval()
    
@@ -272,7 +272,7 @@ def main(args):
     from openvla.prismatic.vla.action_tokenizer import ActionTokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
-    from finetune_spacialist_calvin import DualSystem
+    from train_spacialist_calvin import DualSystem
     dual_sys = DualSystem(model, diffusion_policy, action_tokenizer)
     dual_sys.ema_fast_system.load_state_dict(torch.load(args.specialist_path), strict=False)
 
@@ -315,6 +315,9 @@ if __name__ == "__main__":
     parser.add_argument("--specialist_path", default="specialist_policy.pt", type=str)
     parser.add_argument("--calvin_path", default="./calvin", type=str)
     parser.add_argument("--log_dir", default="CALVIN_ABC-D", type=str)
+    parser.add_argument("--with_depth", default=True, action="store_true")
+    parser.add_argument("--with_gripper", default=True, action="store_true")
+    parser.add_argument("--with_tactile", default=False, action="store_true")
     parser.add_argument("--enrich_lang", default=False, action="store_true")
     args = parser.parse_args()
 
