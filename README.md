@@ -146,13 +146,21 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train_spacialist
 ```
 
 ### :three: Evaluation <a name="Evaluation"></a>
+> First set your ```CALVIN_ROOT``` environment variable wtih:
+```bash
+export CALVIN_ROOT=/path/to/your/calvin_root_path
+```
 - Start evaluation on CALVIN (multi-GPU is also supported):
 ```bash
 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/evaluate_calvin.py \
                                  --generalist_path "/path/to/calvin_generalist" \
                                  --specialist_path "/path/to/calvin_specialist" \
+                                 --with_depth \                 # use depth input
+                                 --with_gripper \               # use gripper-view inputs (both RGB and depth)
+                                 --with_cfg \                   # enable classifier-free guidance
                                  --log_dir calvin
 ```
+> Please refer to ```vla-scripts/evaluate_calvin.py``` for all evaluation options.
 
 
 ## :pencil: Citation
