@@ -265,7 +265,8 @@ def main(args):
                                                 progressive_noise=False,
                                                 with_gripper=args.with_gripper,
                                                 with_tactile=args.with_tactile,
-                                                cond_drop_chance=0,
+                                                cond_drop_chance=0.1 if args.with_cfg else 0.,  
+                                                # set cond_drop_chance > 0 to activate CFG
                                               ).eval()
    
 
@@ -318,6 +319,7 @@ if __name__ == "__main__":
     parser.add_argument("--with_depth", default=True, action="store_true")
     parser.add_argument("--with_gripper", default=True, action="store_true")
     parser.add_argument("--with_tactile", default=False, action="store_true")
+    parser.add_argument("--with_cfg", default=False, action="store_true")
     parser.add_argument("--enrich_lang", default=False, action="store_true")
     args = parser.parse_args()
 
