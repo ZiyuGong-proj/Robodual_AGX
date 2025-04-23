@@ -204,7 +204,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                     act_loss = output.loss
 
 
-                forward_dynamics_loss = torch.zeros(1)
                 loss = act_loss / cfg.grad_accumulation_steps
                 accelerator.backward(loss)
 
@@ -231,7 +230,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 # Push Metrics to W&B (every 10 steps)
                 if accelerator.is_main_process and step_idx % 10 == 0:
                     wandb.log(
-                        {"train_loss": loss, "action_accuracy": action_accuracy, "l1_loss": action_l1_loss, "FD loss": feature_pred_loss}, step=global_step
+                        {"train_loss": loss, "action_accuracy": action_accuracy, "l1_loss": action_l1_loss}, step=global_step
                     )
 
                 # Optimizer Step
