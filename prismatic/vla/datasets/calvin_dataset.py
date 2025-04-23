@@ -479,7 +479,7 @@ class BaseCalvinDataset(Dataset):
             Loaded sequence.
         """
 
-        pred_actions = random.randint(0, self.action_chunking_size - 1)
+        pred_actions = random.randint(0, max(self.action_chunking_size - 1, 0))
         sequence = self._get_sequences(idx, self.window_size + pred_actions, head=False)
 
         
