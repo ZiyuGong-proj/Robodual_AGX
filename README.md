@@ -57,7 +57,7 @@ The trend of dual-systems for robotics is shown below. In particular, *Asynchron
 
 ## :pushpin: TODO list
 
-- [ ] Release checkpoints for reproduction (*Scheduled Release Date*: **Mid-April, 2025**)
+- [x] Release checkpoints for reproduction (*Scheduled Release Date*: **Mid-April, 2025**)
 
 
 ## :video_game: Getting Started <a name="installation"></a>
@@ -98,7 +98,9 @@ sh install.sh
 
 ## :star: Model Checkpoints
 
-> To be released
+- Generalist Policy: [![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-sm.svg)](https://huggingface.co/qwbu/RoboDual-OpenVLA-Generalist)
+- Specialist Policy: [![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-sm-dark.svg)](https://huggingface.co/qwbu/RoboDual-Specialist)
+
 
 ## Experiment on CALVIN
 
