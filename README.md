@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> 🌟 Stay up to date at [opendrivelab.com](https://opendrivelab.com/#news)!
+
 # :gemini:RoboDual
 The official implementation of our paper: \
 **Towards Synergistic, Generalized and Efficient Dual-System for Robotic Manipulation**
