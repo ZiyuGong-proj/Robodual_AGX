@@ -331,6 +331,8 @@ def main(args):
     avg_reward = acc.gather_for_metrics(avg_reward).mean() 
     #################
     gathered_latency = acc.gather_for_metrics(local_latency_stats)
+    if gathered_latency.ndim == 1:
+        gathered_latency = gathered_latency.unsqueeze(0)
     ####################
     
 
@@ -343,10 +345,14 @@ def main(args):
     if acc.is_main_process:
         print('average success rate ', avg_reward)
         #################################################
-        total_ttft_sum = gathered_latency[:, 0].sum().item()
-        total_ttft_count = gathered_latency[:, 1].sum().item()
-        total_tpot_sum = gathered_latency[:, 2].sum().item()
-        total_tpot_count = gathered_latency[:, 3].sum().item()
+        if gathered_latency.numel() == 0:
+            total_ttft_sum = total_ttft_count = 0.0
+            total_tpot_sum = total_tpot_count = 0.0
+        else:
+            total_ttft_sum = gathered_latency[:, 0].sum().item()
+            total_ttft_count = gathered_latency[:, 1].sum().item()
+            total_tpot_sum = gathered_latency[:, 2].sum().item()
+            total_tpot_count = gathered_latency[:, 3].sum().item()
 
         if total_ttft_count > 0:
             print(
