@@ -364,7 +364,13 @@ def main(args):
         ####################################################
         
 
-        #add5
+        # Report execution frequencies for each component of the asynchronous dual system.
+        pretty_names = {
+            "generalist": "Generalist inference",
+            "specialist": "Specialist rollout",
+            "control": "Control loop",
+        }
+
         for name, tensor in gathered_timing.items():
             if tensor.ndim == 1:
                 tensor = tensor.unsqueeze(0)
@@ -377,14 +383,16 @@ def main(args):
                 variance = max(total_sq / total_count - mean_duration * mean_duration, 0.0)
                 std_duration = variance ** 0.5
                 frequency = 1.0 / mean_duration if mean_duration > 0 else 0.0
+                label = pretty_names.get(name, name.capitalize())
                 print(
-                    f"{name.capitalize()} frequency: {frequency:.2f} Hz ("
+                    f"{label} frequency: {frequency:.2f} Hz ("
                     f"mean {mean_duration * 1000:.2f} ms, std {std_duration * 1000:.2f} ms, "
                     f"n={int(total_count)})"
                 )
             else:
-                print(f"{name.capitalize()} frequency: insufficient data")
-        #add5_end
+                label = pretty_names.get(name, name.capitalize())
+                print(f"{label} frequency: insufficient data")
+        # End frequency reporting block
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

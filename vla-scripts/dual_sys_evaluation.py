@@ -123,7 +123,6 @@ class ActionTokenTimingStreamer(BaseStreamer):
 ###################################
 
 
-#add1
 @dataclass
 class TimingAggregator:
     """Keeps running statistics for latency measurements."""
@@ -149,6 +148,11 @@ class TimingAggregator:
         self.total += other.total
         self.total_sq += other.total_sq
 
+    def snapshot(self) -> "TimingAggregator":
+        """Create an immutable copy of the current statistics."""
+
+        return TimingAggregator(self.count, self.total, self.total_sq)
+
     def mean(self) -> float:
         if self.count == 0:
             return 0.0
@@ -166,7 +170,6 @@ class TimingAggregator:
         if mean == 0.0:
             return 0.0
         return 1.0 / mean
-#add1_end
 
 def get_openvla_prompt(instruction: str, tokenized_action: str = None) -> str:
     return f"In: What action should the robot take to {instruction.lower()}?\nOut:"
@@ -226,11 +229,9 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self.tpot_records = []
         ########################
 
-        #add2
         self._generalist_stats = TimingAggregator()
         self._specialist_stats = TimingAggregator()
         self._control_stats = TimingAggregator()
-        #add2_end
 
         # Threading primitives for asynchronous generalist execution
         self._generalist_queue: "queue.Queue[tuple[int, int, int, dict[str, torch.Tensor]]]" = queue.Queue(maxsize=1)
@@ -454,9 +455,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             hist_action[:, -available_hist_acts:] = torch.stack(self.hist_action[-available_hist_acts:], dim=0).unsqueeze(0).to(self.device)
 
         
-        #add5
         specialist_start = time.perf_counter()
-        #add5_end
         dp_action = self.dual_impl.ema_fast_system.ema_model.predict_action(
                                                             ref_action = ref_actions.to(torch.float),
                                                             action_cond = current_hidden_states.to(torch.float),
@@ -468,9 +467,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                                                             proprio = state,
                                                             hist_action=hist_action,
                                                             )
-        #add6
         self._specialist_stats.update(time.perf_counter() - specialist_start)
-        #add6_end
         self.obs_buffer = image
         action = np.array(dp_action.tolist())
 
@@ -500,17 +497,18 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self._specialist_exec_counter += 1
 
         return action_prediction
-    #add7
     def record_control_cycle(self, duration: float) -> None:
         self._control_stats.update(duration)
 
     def timing_summaries(self) -> dict:
+        with self._generalist_lock:
+            generalist_stats = self._generalist_stats.snapshot()
+
         return {
-            "generalist": self._generalist_stats,
-            "specialist": self._specialist_stats,
-            "control": self._control_stats,
+            "generalist": generalist_stats,
+            "specialist": self._specialist_stats.snapshot(),
+            "control": self._control_stats.snapshot(),
         }
-    #add7_end
 #######################################################
 
     def report_latency_metrics(self) -> None:
