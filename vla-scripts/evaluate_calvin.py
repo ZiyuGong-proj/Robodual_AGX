@@ -202,9 +202,17 @@ def rollout(env, model, task_oracle, subtask, val_annotations, debug, eval_dir, 
         }
 
     for step in range(ep_len):
+        #add1
+        cycle_start = time.perf_counter()
+        #add1_end
         action = model.step(obs, lang_annotation, step)
         obs, _, _, current_info = env.step(action)
 
+        #add2
+        cycle_end = time.perf_counter()
+        if hasattr(model, "record_control_cycle"):
+            model.record_control_cycle(cycle_end - cycle_start)
+        #add2_end
         if debug:
             img_dict['static'].append(copy.deepcopy(obs['rgb_obs']['rgb_static']))
             img_dict['gripper'].append(copy.deepcopy(obs['rgb_obs']['rgb_gripper']))
@@ -286,9 +294,13 @@ def main(args):
         'state_obs': ['robot_obs'], 
         'actions': ['rel_actions'], 
         'language': ['language']}
+    
     eval_dir = save_path + f'/eval{torch.cuda.current_device()}/'
     os.makedirs(eval_dir, exist_ok=True)
-    env = make_env(os.path.join(CALVIN_ROOT, 'dataset/task_ABC_D'), observation_space, device)
+    
+    #env = make_env(os.path.join(CALVIN_ROOT, 'dataset/task_ABC_D'), observation_space, device)
+    env = make_env("/nvmeroot/repos/calvin/dataset/calvin_debug_dataset", observation_space, device)
+
     eva = DualSystemCalvinEvaluation(dual_sys, processor, action_tokenizer)
     dual_sys.eval()
     avg_reward = torch.tensor(evaluate_policy(
@@ -300,15 +312,79 @@ def main(args):
         acc.process_index,
         eval_dir = eval_dir,
         ep_len = 360,
-        num_sequences = 1000,
+        num_sequences = 3,
         enrich_lang=args.enrich_lang,
         debug = False,
     )).float().mean().to(device)
 
+    ##################################
+    local_latency_stats = torch.tensor(eva.get_latency_aggregates(), device=device, dtype=torch.float64)
+    ###############################
+
+    #add3
+    timing_tensors = {
+        name: stats.to_tensor(eva.device)
+        for name, stats in eva.timing_summaries().items()
+    }
+    #add3_end
     acc.wait_for_everyone()
     avg_reward = acc.gather_for_metrics(avg_reward).mean() 
+    #################
+    gathered_latency = acc.gather_for_metrics(local_latency_stats)
+    ####################
+    
+
+    #add4
+    gathered_timing = {
+        name: acc.gather_for_metrics(tensor)
+        for name, tensor in timing_tensors.items()
+    }
+    #add4_end
     if acc.is_main_process:
         print('average success rate ', avg_reward)
+        #################################################
+        total_ttft_sum = gathered_latency[:, 0].sum().item()
+        total_ttft_count = gathered_latency[:, 1].sum().item()
+        total_tpot_sum = gathered_latency[:, 2].sum().item()
+        total_tpot_count = gathered_latency[:, 3].sum().item()
+
+        if total_ttft_count > 0:
+            print(
+                f"[Latency][System-1] Average TTFT: {total_ttft_sum / total_ttft_count:.4f}s over {int(total_ttft_count)} runs"
+            )
+        else:
+            print("[Latency][System-1] No TTFT measurements were recorded.")
+
+        if total_tpot_count > 0:
+            print(
+                f"[Latency][System-1] Average TPOT: {total_tpot_sum / total_tpot_count:.4f}s over {int(total_tpot_count)} runs"
+            )
+        else:
+            print("[Latency][System-1] No TPOT measurements were recorded.")
+        ####################################################
+        
+
+        #add5
+        for name, tensor in gathered_timing.items():
+            if tensor.ndim == 1:
+                tensor = tensor.unsqueeze(0)
+            total_count = tensor[:, 0].sum().item()
+            total_duration = tensor[:, 1].sum().item()
+            total_sq = tensor[:, 2].sum().item()
+
+            if total_count > 0 and total_duration > 0:
+                mean_duration = total_duration / total_count
+                variance = max(total_sq / total_count - mean_duration * mean_duration, 0.0)
+                std_duration = variance ** 0.5
+                frequency = 1.0 / mean_duration if mean_duration > 0 else 0.0
+                print(
+                    f"{name.capitalize()} frequency: {frequency:.2f} Hz ("
+                    f"mean {mean_duration * 1000:.2f} ms, std {std_duration * 1000:.2f} ms, "
+                    f"n={int(total_count)})"
+                )
+            else:
+                print(f"{name.capitalize()} frequency: insufficient data")
+        #add5_end
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

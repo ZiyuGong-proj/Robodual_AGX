@@ -11,6 +11,7 @@ Notes:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Type, Union
@@ -18,6 +19,7 @@ from typing import Callable, Dict, List, Optional, Type, Union
 import torch
 from PIL import Image
 from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy
+from torch.cuda import nvtx
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from prismatic.models.backbones.llm import LLMBackbone
@@ -81,6 +83,7 @@ class PrismaticVLM(VLM):
             token_idx_list = self.llm_backbone.tokenizer.encode(trigger_string, add_special_tokens=False)
             assert len(token_idx_list) == 1, f'String "{trigger_string}" is tokenized as more than one token!'
             self.string2idx[trigger_string] = token_idx_list[0]
+
 
     @classmethod
     def from_pretrained(
@@ -574,7 +577,6 @@ class PrismaticVLM(VLM):
                         return_dict_in_generate=True,
                         **kwargs,
                     )
-
                     # Generation pattern should usually be [TOKEN] <EOS> for True/False and Yes/No Generations
                     gen_ids = full_out_dict.sequences[0, input_ids.shape[1] :]
 
