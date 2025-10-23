@@ -343,8 +343,27 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
     def _maybe_request_generalist(self, inputs: dict[str, torch.Tensor], step: int, wait: bool = False) -> None:
         success = self._submit_generalist_request(inputs, step, block=wait)
         if wait:
-            self._generalist_ready_event.wait()
-            self._generalist_ready_event.clear()
+            while True:
+                self._generalist_ready_event.wait()
+                self._generalist_ready_event.clear()
+
+                with self._generalist_lock:
+                    ready = self.hidden_states is not None and self.action is not None
+                    pending = self._pending_generalist
+
+                if ready:
+                    break
+
+                if pending:
+                    # We were notified while the worker is still running; continue waiting.
+                    continue
+
+                # The previous request completed without producing results (likely due to a
+                # context reset). Submit a fresh blocking request with the same inputs.
+                success = self._submit_generalist_request(inputs, step, block=True)
+                if not success:
+                    # Give the worker time to drain the queue before retrying.
+                    time.sleep(0.01)
         elif not success:
             # Another generalist request is currently running; let it finish asynchronously.
             pass
