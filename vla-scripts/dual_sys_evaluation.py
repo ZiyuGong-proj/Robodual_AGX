@@ -1,12 +1,15 @@
-import torch
-import torchvision.transforms as T
-import torch.nn.functional as F
-import numpy as np
-from PIL import Image
-from einops import rearrange
+import queue
+import threading
 import time
 import math
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchvision.transforms as T
+from PIL import Image
 from dataclasses import dataclass
+from einops import rearrange
 
 from typing import Optional
 from transformers.generation.streamers import BaseStreamer
@@ -229,7 +232,123 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self._control_stats = TimingAggregator()
         #add2_end
 
+        # Threading primitives for asynchronous generalist execution
+        self._generalist_queue: "queue.Queue[tuple[int, int, int, dict[str, torch.Tensor]]]" = queue.Queue(maxsize=1)
+        self._generalist_ready_event = threading.Event()
+        self._generalist_lock = threading.Lock()
+        self._generalist_thread: Optional[threading.Thread] = None
+        self._generalist_stop_event = threading.Event()
+        self._pending_generalist = False
+        self._generalist_request_counter = 0
+        self._generalist_context = 0
+
+        self._specialist_exec_counter = 0
+
+        self._start_generalist_worker()
+
         
+    def _start_generalist_worker(self) -> None:
+        if self._generalist_thread is not None and self._generalist_thread.is_alive():
+            return
+
+        self._generalist_stop_event.clear()
+
+        def _worker_loop():
+            while not self._generalist_stop_event.is_set():
+                try:
+                    payload = self._generalist_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                if payload is None:
+                    self._generalist_queue.task_done()
+                    break
+
+                context_id, request_id, step_index, inputs = payload
+                generalist_start = time.perf_counter()
+
+                streamer = ActionTokenTimingStreamer(device=self.device)
+                streamer.start()
+                action, hidden_states = self.dual_impl.slow_system.predict_action(
+                    streamer=streamer, do_sample=False, **inputs
+                )
+                streamer.finalize()
+                timing_metrics = streamer.get_metrics()
+                if timing_metrics is not None:
+                    ttft = timing_metrics["ttft"]
+                    tpot = timing_metrics["tpot"]
+                    with self._generalist_lock:
+                        self.ttft_records.append(ttft)
+                        self.tpot_records.append(tpot)
+                    print(
+                        f"[Latency][System-2] Step {step_index}: TTFT={ttft:.4f}s, TPOT={tpot:.4f}s, Tokens={timing_metrics['token_count']}"
+                    )
+
+                action = torch.tensor(action).to(hidden_states.device).unsqueeze(0)
+                action = rearrange(action, "b (f d) -> b f d", f=self.temporal_size)[:, :, :7]
+
+                duration = time.perf_counter() - generalist_start
+                with self._generalist_lock:
+                    if context_id != self._generalist_context:
+                        self._pending_generalist = False
+                        self._generalist_queue.task_done()
+                        self._generalist_ready_event.set()
+                        continue
+
+                    self.action = action
+                    self.hidden_states = hidden_states
+                    self._pending_generalist = False
+                    self._generalist_stats.update(duration)
+                self._generalist_ready_event.set()
+                self._generalist_queue.task_done()
+
+        self._generalist_thread = threading.Thread(target=_worker_loop, daemon=True)
+        self._generalist_thread.start()
+
+    def _stop_generalist_worker(self) -> None:
+        if self._generalist_thread is None:
+            return
+
+        self._generalist_stop_event.set()
+        try:
+            self._generalist_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        self._generalist_thread.join(timeout=1.0)
+        self._generalist_thread = None
+
+    def _submit_generalist_request(self, inputs: dict[str, torch.Tensor], step: int, *, block: bool) -> bool:
+        with self._generalist_lock:
+            if self._pending_generalist:
+                return False
+
+            self._generalist_request_counter += 1
+            request_id = self._generalist_request_counter
+            context_id = self._generalist_context
+            self._pending_generalist = True
+
+        try:
+            self._generalist_ready_event.clear()
+            if block:
+                self._generalist_queue.put((context_id, request_id, step, inputs))
+                return True
+            else:
+                self._generalist_queue.put_nowait((context_id, request_id, step, inputs))
+                return True
+        except queue.Full:
+            with self._generalist_lock:
+                self._pending_generalist = False
+            return False
+
+    def _maybe_request_generalist(self, inputs: dict[str, torch.Tensor], step: int, wait: bool = False) -> None:
+        success = self._submit_generalist_request(inputs, step, block=wait)
+        if wait:
+            self._generalist_ready_event.wait()
+            self._generalist_ready_event.clear()
+        elif not success:
+            # Another generalist request is currently running; let it finish asynchronously.
+            pass
+
     def reset(self,):
         """
         This is called
@@ -239,6 +358,14 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self.action_buffer_mask = np.zeros((self.temporal_mask.shape[0], self.temporal_mask.shape[0]), dtype=np.bool_)
         self.obs_buffer = None
         self.hist_action = []
+
+        with self._generalist_lock:
+            self._generalist_context += 1
+            self.hidden_states = None
+            self.action = None
+            self._pending_generalist = False
+        self._generalist_ready_event.clear()
+        self._specialist_exec_counter = 0
 
 
     def step(self, obs, instruction, step):
@@ -264,45 +391,32 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         inputs = self.processor(prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
 
 
-        if (step + 1) % 8 == 0 or step == 0: 
-            # Run VLA Inference
-            #add3
-            generalist_start = time.perf_counter()
-            #add3_end
-            #action, hidden_states = self.dual_impl.slow_system.predict_action(**inputs, do_sample=False)
-            ############################################
-            streamer = ActionTokenTimingStreamer(device=self.device)
-            streamer.start()
-            action, hidden_states = self.dual_impl.slow_system.predict_action(
-                streamer=streamer, do_sample=False, **inputs
-            )
-            streamer.finalize()
-            timing_metrics = streamer.get_metrics()
-            if timing_metrics is not None:
-                ttft = timing_metrics["ttft"]
-                tpot = timing_metrics["tpot"]
-                self.ttft_records.append(ttft)
-                self.tpot_records.append(tpot)
-                print(
-                    f"[Latency][System-2] Step {step}: TTFT={ttft:.4f}s, TPOT={tpot:.4f}s, Tokens={timing_metrics['token_count']}"
-                )
-            ##################################
-            #add4
-            self._generalist_stats.update(time.perf_counter() - generalist_start)
-            #add4_end
-            action = torch.tensor(action).to(hidden_states.device).unsqueeze(0)
-            action = rearrange(action, 'b (f d) -> b f d', f=8)
-            self.action = action[:,:,:7]
-            self.hidden_states = hidden_states
+        with self._generalist_lock:
+            generalist_ready = self.hidden_states is not None
+
+        if not generalist_ready:
+            self._maybe_request_generalist(inputs, step, wait=True)
+        elif (self._specialist_exec_counter + 1) % self.temporal_size == 0:
+            self._maybe_request_generalist(inputs, step, wait=False)
+
+        with self._generalist_lock:
+            current_action = self.action
+            current_hidden_states = self.hidden_states
+
+        if current_action is None or current_hidden_states is None:
+            raise RuntimeError("Generalist output was not ready for specialist inference.")
 
 
-        num_cond_actions = 8 - (step + 1) % 8
+        remainder = (step + 1) % self.temporal_size
+        num_cond_actions = self.temporal_size if remainder == 0 else self.temporal_size - remainder
         if step == 0:
-            num_cond_actions = 8
+            num_cond_actions = self.temporal_size
 
-        zero_actions = torch.zeros((1, self.temporal_size, 7))
-        zero_actions[:, :num_cond_actions] = self.action[:, -num_cond_actions:]
-        ref_actions = zero_actions.to(self.action.device)
+        zero_actions = torch.zeros(
+            (1, self.temporal_size, 7), device=current_action.device, dtype=current_action.dtype
+        )
+        zero_actions[:, :num_cond_actions] = current_action[:, -num_cond_actions:]
+        ref_actions = zero_actions
 
         state = torch.from_numpy(obs['robot_obs']).to(self.device, dtype=torch.float)
         state = torch.cat([state[:6], state[[-1]]], dim=-1).unsqueeze(0)
@@ -326,7 +440,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         #add5_end
         dp_action = self.dual_impl.ema_fast_system.ema_model.predict_action(
                                                             ref_action = ref_actions.to(torch.float),
-                                                            action_cond = self.hidden_states.to(torch.float),
+                                                            action_cond = current_hidden_states.to(torch.float),
                                                             obs = obs,
                                                             depth_obs = depth_image,
                                                             gripper_obs = (gripper_image, depth_gripper),
@@ -364,6 +478,8 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
         self.hist_action.append(torch.from_numpy(action_prediction))
 
+        self._specialist_exec_counter += 1
+
         return action_prediction
     #add7
     def record_control_cycle(self, duration: float) -> None:
@@ -397,3 +513,6 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             float(len(self.tpot_records)),
         )
     ###################################################
+
+    def __del__(self):
+        self._stop_generalist_worker()
