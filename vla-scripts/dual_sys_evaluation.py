@@ -204,6 +204,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self.action_tokenizer = action_tokenizer
 
         self.temporal_size = 8
+        self._generalist_refresh_interval = 4
         self.temporal_mask = torch.flip(torch.triu(torch.ones(self.temporal_size, self.temporal_size, dtype=torch.bool)), dims=[1]).numpy()
         
         self.action_buffer = np.zeros((self.temporal_mask.shape[0], self.temporal_mask.shape[0], 7))
@@ -416,7 +417,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
         if not generalist_ready:
             self._maybe_request_generalist(inputs, step, wait=True)
-        elif (self._specialist_exec_counter + 1) % self.temporal_size == 0:
+        elif (self._specialist_exec_counter + 1) % self._generalist_refresh_interval == 0:
             self._maybe_request_generalist(inputs, step, wait=False)
 
         with self._generalist_lock:
