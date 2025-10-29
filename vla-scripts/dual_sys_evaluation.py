@@ -13,6 +13,7 @@ from einops import rearrange
 
 from typing import Optional
 from transformers.generation.streamers import BaseStreamer
+from torch.cuda import nvtx
 
 
 from calvin_agent.models.calvin_base_model import CalvinBaseModel
@@ -52,11 +53,22 @@ class ActionTokenTimingStreamer(BaseStreamer):
         self.token_count = 0
         self.finished = False
         self.prompt_token_count = 0
+        if getattr(self, "_nvtx_enabled", False):
+            if getattr(self, "_decode_range_active", False):
+                nvtx.range_pop()
+            if getattr(self, "_prefill_range_active", False):
+                nvtx.range_pop()
         self._prefill_handled = False
+        self._prefill_range_active = False
+        self._decode_range_active = False
+        self._nvtx_enabled = torch.cuda.is_available()
 
     def start(self) -> None:
         self._synchronize_device()
         self.start_time = time.perf_counter()
+        if self._nvtx_enabled and not self._prefill_range_active:
+            nvtx.range_push("Generalist Prefill")
+            self._prefill_range_active = True
 
     def put(self, value) -> None:
         self._synchronize_device()
@@ -89,6 +101,13 @@ class ActionTokenTimingStreamer(BaseStreamer):
         if self.first_token_time is None:
             self.first_token_time = now
 
+        if self._nvtx_enabled and self._prefill_range_active:
+            nvtx.range_pop()
+            self._prefill_range_active = False
+        if self._nvtx_enabled and not self._decode_range_active:
+            nvtx.range_push("Generalist Decoding")
+            self._decode_range_active = True
+
         self.token_times.extend([now] * num_tokens)
         self.token_count += num_tokens
 
@@ -96,6 +115,12 @@ class ActionTokenTimingStreamer(BaseStreamer):
         self._synchronize_device()
         self.end_time = time.perf_counter()
         self.finished = True
+        if self._nvtx_enabled and self._decode_range_active:
+            nvtx.range_pop()
+            self._decode_range_active = False
+        if self._nvtx_enabled and self._prefill_range_active:
+            nvtx.range_pop()
+            self._prefill_range_active = False
 
     def finalize(self) -> None:
         if not self.finished:
@@ -457,17 +482,31 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
         
         specialist_start = time.perf_counter()
-        dp_action = self.dual_impl.ema_fast_system.ema_model.predict_action(
-                                                            ref_action = ref_actions.to(torch.float),
-                                                            action_cond = current_hidden_states.to(torch.float),
-                                                            obs = obs,
-                                                            depth_obs = depth_image,
-                                                            gripper_obs = (gripper_image, depth_gripper),
-                                                            tactile_obs = tactile_image,
-                                                            lang= instruction,
-                                                            proprio = state,
-                                                            hist_action=hist_action,
-                                                            )
+        if torch.cuda.is_available():
+            with nvtx.range("Specialist Inference"):
+                dp_action = self.dual_impl.ema_fast_system.ema_model.predict_action(
+                    ref_action=ref_actions.to(torch.float),
+                    action_cond=current_hidden_states.to(torch.float),
+                    obs=obs,
+                    depth_obs=depth_image,
+                    gripper_obs=(gripper_image, depth_gripper),
+                    tactile_obs=tactile_image,
+                    lang=instruction,
+                    proprio=state,
+                    hist_action=hist_action,
+                )
+        else:
+            dp_action = self.dual_impl.ema_fast_system.ema_model.predict_action(
+                ref_action=ref_actions.to(torch.float),
+                action_cond=current_hidden_states.to(torch.float),
+                obs=obs,
+                depth_obs=depth_image,
+                gripper_obs=(gripper_image, depth_gripper),
+                tactile_obs=tactile_image,
+                lang=instruction,
+                proprio=state,
+                hist_action=hist_action,
+            )
         self._specialist_stats.update(time.perf_counter() - specialist_start)
         self.obs_buffer = image
         action = np.array(dp_action.tolist())
