@@ -244,17 +244,57 @@ def main(args):
     device = acc.device
 
 
+    if args.generalist_load_in_4bit and args.generalist_load_in_8bit:
+        raise ValueError("Cannot enable both 4-bit and 8-bit quantization simultaneously.")
+
     # Load generalist policy
     from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
-    quantization_config = None
-    processor = AutoProcessor.from_pretrained(args.generalist_path, trust_remote_code=True)
-    model = AutoModelForVision2Seq.from_pretrained(
-            args.generalist_path,
-            torch_dtype=torch.bfloat16,
-            quantization_config=quantization_config,
-            low_cpu_mem_usage=False,
-            trust_remote_code=True,
+
+    dtype_key = args.generalist_dtype.lower()
+
+    generalist_dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+
+    if dtype_key not in generalist_dtype_map:
+        raise ValueError(
+            f"Unsupported dtype '{args.generalist_dtype}'. Choose from {list(generalist_dtype_map.keys())}."
         )
+
+    processor = AutoProcessor.from_pretrained(args.generalist_path, trust_remote_code=True)
+
+    quantization_config = None
+    if args.generalist_load_in_8bit:
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+    elif args.generalist_load_in_4bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=generalist_dtype_map[dtype_key],
+            bnb_4bit_use_double_quant=True,
+        )
+
+    model_kwargs = dict(
+        trust_remote_code=True,
+        quantization_config=quantization_config,
+        low_cpu_mem_usage=False,
+    )
+
+    if quantization_config is not None:
+        model_kwargs["device_map"] = "auto"
+
+    if quantization_config is None:
+        model_kwargs["torch_dtype"] = generalist_dtype_map[dtype_key]
+
+    model = AutoModelForVision2Seq.from_pretrained(
+        args.generalist_path,
+        **model_kwargs,
+    )
+
+    if quantization_config is None:
+        model.to(device=device, dtype=generalist_dtype_map[dtype_key])
+
     model.eval()
 
     # Load specialist policy
@@ -402,7 +442,28 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--generalist_path", default="openvla7b", type=str)
+    parser.add_argument(
+        "--generalist_path",
+        default="Embodied-CoT/ecot-openvla-7b-bridge",
+        type=str,
+        help="Path or Hugging Face repo id of the generalist model.",
+    )
+    parser.add_argument(
+        "--generalist_dtype",
+        default="bfloat16",
+        type=str,
+        help="Floating point precision for the generalist when not using quantization (bfloat16, float16, float32).",
+    )
+    parser.add_argument(
+        "--generalist_load_in_4bit",
+        action="store_true",
+        help="Load the generalist in 4-bit quantized format (requires bitsandbytes).",
+    )
+    parser.add_argument(
+        "--generalist_load_in_8bit",
+        action="store_true",
+        help="Load the generalist in 8-bit quantized format (requires bitsandbytes).",
+    )
     parser.add_argument("--specialist_path", default="specialist_policy.pt", type=str)
     parser.add_argument("--calvin_path", default="./calvin", type=str)
     parser.add_argument("--log_dir", default="CALVIN_ABC-D", type=str)
