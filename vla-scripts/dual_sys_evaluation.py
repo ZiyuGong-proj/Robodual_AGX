@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from PIL import Image
 from dataclasses import dataclass
-from einops import rearrange
 
 from typing import Optional
 from transformers.generation.streamers import BaseStreamer
@@ -311,8 +310,31 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                         f"[Latency][System-2] Step {step_index}: TTFT={ttft:.4f}s, TPOT={tpot:.4f}s, Tokens={timing_metrics['token_count']}"
                     )
 
-                action = torch.tensor(action).to(hidden_states.device).unsqueeze(0)
-                action = rearrange(action, "b (f d) -> b f d", f=self.temporal_size)[:, :, :7]
+                action = torch.as_tensor(action, device=hidden_states.device)
+                if action.ndim == 1:
+                    action = action.unsqueeze(0)
+                elif action.ndim > 2:
+                    action = action.reshape(action.shape[0], -1)
+
+                action = action.to(hidden_states.dtype)
+
+                flat_action_dim = action.shape[-1]
+                if flat_action_dim % 7 != 0:
+                    raise ValueError(
+                        "Generalist returned an action whose dimension is not divisible by 7: "
+                        f"{flat_action_dim}"
+                    )
+
+                num_chunks = flat_action_dim // 7
+                action = action.reshape(action.shape[0], num_chunks, 7)
+
+                if num_chunks < self.temporal_size:
+                    pad_chunks = self.temporal_size - num_chunks
+                    pad_values = action[:, -1:, :].repeat(1, pad_chunks, 1)
+                    action = torch.cat((action, pad_values), dim=1)
+                elif num_chunks > self.temporal_size:
+                    action = action[:, -self.temporal_size :, :]
+
 
                 duration = time.perf_counter() - generalist_start
                 with self._generalist_lock:
