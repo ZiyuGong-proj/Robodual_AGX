@@ -267,6 +267,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self._pending_generalist = False
         self._generalist_request_counter = 0
         self._generalist_context = 0
+        self._generalist_error: Optional[BaseException] = None
 
         self._specialist_exec_counter = 0
 
@@ -293,63 +294,73 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                 context_id, request_id, step_index, inputs = payload
                 generalist_start = time.perf_counter()
 
-                streamer = ActionTokenTimingStreamer(device=self.device)
-                streamer.start()
-                action, hidden_states = self.dual_impl.slow_system.predict_action(
-                    streamer=streamer, do_sample=False, **inputs
-                )
-                streamer.finalize()
-                timing_metrics = streamer.get_metrics()
-                if timing_metrics is not None:
-                    ttft = timing_metrics["ttft"]
-                    tpot = timing_metrics["tpot"]
+                try:
+                    streamer = ActionTokenTimingStreamer(device=self.device)
+                    streamer.start()
+                    action, hidden_states = self.dual_impl.slow_system.predict_action(
+                        streamer=streamer, do_sample=False, **inputs
+                    )
+                    streamer.finalize()
+                    timing_metrics = streamer.get_metrics()
+                    if timing_metrics is not None:
+                        ttft = timing_metrics["ttft"]
+                        tpot = timing_metrics["tpot"]
+                        with self._generalist_lock:
+                            self.ttft_records.append(ttft)
+                            self.tpot_records.append(tpot)
+                        print(
+                            f"[Latency][System-2] Step {step_index}: TTFT={ttft:.4f}s, TPOT={tpot:.4f}s, Tokens={timing_metrics['token_count']}"
+                        )
+
+                    action = torch.as_tensor(action, device=hidden_states.device)
+                    if action.ndim == 1:
+                        action = action.unsqueeze(0)
+                    elif action.ndim > 2:
+                        action = action.reshape(action.shape[0], -1)
+
+                    action = action.to(hidden_states.dtype)
+
+                    flat_action_dim = action.shape[-1]
+                    if flat_action_dim % 7 != 0:
+                        raise ValueError(
+                            "Generalist returned an action whose dimension is not divisible by 7: "
+                            f"{flat_action_dim}"
+                        )
+
+                    num_chunks = flat_action_dim // 7
+                    action = action.reshape(action.shape[0], num_chunks, 7)
+
+                    if num_chunks < self.temporal_size:
+                        pad_chunks = self.temporal_size - num_chunks
+                        pad_values = action[:, -1:, :].repeat(1, pad_chunks, 1)
+                        action = torch.cat((action, pad_values), dim=1)
+                    elif num_chunks > self.temporal_size:
+                        action = action[:, -self.temporal_size :, :]
+
+
+                    duration = time.perf_counter() - generalist_start
                     with self._generalist_lock:
-                        self.ttft_records.append(ttft)
-                        self.tpot_records.append(tpot)
-                    print(
-                        f"[Latency][System-2] Step {step_index}: TTFT={ttft:.4f}s, TPOT={tpot:.4f}s, Tokens={timing_metrics['token_count']}"
-                    )
+                        if context_id != self._generalist_context:
+                            self._pending_generalist = False
+                            self._generalist_ready_event.set()
+                            continue
 
-                action = torch.as_tensor(action, device=hidden_states.device)
-                if action.ndim == 1:
-                    action = action.unsqueeze(0)
-                elif action.ndim > 2:
-                    action = action.reshape(action.shape[0], -1)
-
-                action = action.to(hidden_states.dtype)
-
-                flat_action_dim = action.shape[-1]
-                if flat_action_dim % 7 != 0:
-                    raise ValueError(
-                        "Generalist returned an action whose dimension is not divisible by 7: "
-                        f"{flat_action_dim}"
-                    )
-
-                num_chunks = flat_action_dim // 7
-                action = action.reshape(action.shape[0], num_chunks, 7)
-
-                if num_chunks < self.temporal_size:
-                    pad_chunks = self.temporal_size - num_chunks
-                    pad_values = action[:, -1:, :].repeat(1, pad_chunks, 1)
-                    action = torch.cat((action, pad_values), dim=1)
-                elif num_chunks > self.temporal_size:
-                    action = action[:, -self.temporal_size :, :]
-
-
-                duration = time.perf_counter() - generalist_start
-                with self._generalist_lock:
-                    if context_id != self._generalist_context:
+                        self.action = action
+                        self.hidden_states = hidden_states
                         self._pending_generalist = False
-                        self._generalist_queue.task_done()
-                        self._generalist_ready_event.set()
-                        continue
-
-                    self.action = action
-                    self.hidden_states = hidden_states
-                    self._pending_generalist = False
-                    self._generalist_stats.update(duration)
-                self._generalist_ready_event.set()
-                self._generalist_queue.task_done()
+                        self._generalist_stats.update(duration)
+                except Exception as exc:  # noqa: BLE001
+                    with self._generalist_lock:
+                        if context_id == self._generalist_context:
+                            self._generalist_error = exc
+                            self.action = None
+                            self.hidden_states = None
+                        self._pending_generalist = False
+                    self._generalist_ready_event.set()
+                else:
+                    self._generalist_ready_event.set()
+                finally:
+                    self._generalist_queue.task_done()
 
         self._generalist_thread = threading.Thread(target=_worker_loop, daemon=True)
         self._generalist_thread.start()
@@ -367,6 +378,12 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self._generalist_thread = None
 
     def _submit_generalist_request(self, inputs: dict[str, torch.Tensor], step: int, *, block: bool) -> bool:
+        with self._generalist_lock:
+            if self._generalist_error is not None:
+                error = self._generalist_error
+                self._generalist_error = None
+                raise RuntimeError("Generalist worker failed") from error
+
         with self._generalist_lock:
             if self._pending_generalist:
                 return False
@@ -399,6 +416,10 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                 with self._generalist_lock:
                     ready = self.hidden_states is not None and self.action is not None
                     pending = self._pending_generalist
+                    error = self._generalist_error
+                    if error is not None:
+                        self._generalist_error = None
+                        raise RuntimeError("Generalist worker failed") from error
 
                 if ready:
                     break
@@ -432,6 +453,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             self.hidden_states = None
             self.action = None
             self._pending_generalist = False
+            self._generalist_error = None
         self._generalist_ready_event.clear()
         self._specialist_exec_counter = 0
 
@@ -468,6 +490,10 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             self._maybe_request_generalist(inputs, step, wait=False)
 
         with self._generalist_lock:
+            if self._generalist_error is not None:
+                error = self._generalist_error
+                self._generalist_error = None
+                raise RuntimeError("Generalist worker failed") from error
             current_action = self.action
             current_hidden_states = self.hidden_states
 
