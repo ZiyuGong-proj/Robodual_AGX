@@ -244,8 +244,11 @@ def main(args):
     device = acc.device
 
 
+    if args.generalist_load_in_4bit and args.generalist_load_in_8bit:
+        raise ValueError("Cannot enable both 4-bit and 8-bit quantization simultaneously.")
+
     # Load generalist policy
-    from transformers import AutoModelForVision2Seq, AutoProcessor
+    from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
 
     dtype_key = args.generalist_dtype.lower()
 
@@ -262,16 +265,51 @@ def main(args):
 
     processor = AutoProcessor.from_pretrained(args.generalist_path, trust_remote_code=True)
 
-    generalist_dtype = generalist_dtype_map[dtype_key]
+    quantization_config = None
+    if args.generalist_load_in_8bit:
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+    elif args.generalist_load_in_4bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=generalist_dtype_map[dtype_key],
+            bnb_4bit_use_double_quant=True,
+        )
 
-    model = AutoModelForVision2Seq.from_pretrained(
-        args.generalist_path,
+    model_kwargs = dict(
         trust_remote_code=True,
-        torch_dtype=generalist_dtype,
+        quantization_config=quantization_config,
         low_cpu_mem_usage=False,
     )
 
-    model.to(device=device, dtype=generalist_dtype)
+    if quantization_config is not None:
+        if device.type != "cuda":
+            raise ValueError(
+                "Quantized loading of the generalist requires a CUDA device. "
+                "Disable --generalist_load_in_4bit/--generalist_load_in_8bit or use a GPU-backed run."
+            )
+
+        device_index = 0 if device.index is None else device.index
+        model_kwargs["device_map"] = {"": f"cuda:{device_index}"}
+
+    if quantization_config is None:
+        model_kwargs["torch_dtype"] = generalist_dtype_map[dtype_key]
+
+    model = AutoModelForVision2Seq.from_pretrained(
+        args.generalist_path,
+        **model_kwargs,
+    )
+
+    if quantization_config is None:
+        model.to(device=device, dtype=generalist_dtype_map[dtype_key])
+    else:
+        loaded_device = next(model.parameters()).device
+        if loaded_device.type != "cuda":
+            raise RuntimeError(
+                "Quantized generalist weights were loaded onto CPU. "
+                "bitsandbytes on this platform likely lacks GPU kernels. "
+                "Retry without quantization (omit --generalist_load_in_4bit/--generalist_load_in_8bit)."
+            )
+
     model.eval()
 
     # Load specialist policy
@@ -429,7 +467,17 @@ if __name__ == "__main__":
         "--generalist_dtype",
         default="bfloat16",
         type=str,
-        help="Floating point precision for the generalist (bfloat16, float16, float32).",
+        help="Floating point precision for the generalist when not using quantization (bfloat16, float16, float32).",
+    )
+    parser.add_argument(
+        "--generalist_load_in_4bit",
+        action="store_true",
+        help="Load the generalist in 4-bit quantized format (requires bitsandbytes).",
+    )
+    parser.add_argument(
+        "--generalist_load_in_8bit",
+        action="store_true",
+        help="Load the generalist in 8-bit quantized format (requires bitsandbytes).",
     )
     parser.add_argument("--specialist_path", default="specialist_policy.pt", type=str)
     parser.add_argument("--calvin_path", default="./calvin", type=str)
