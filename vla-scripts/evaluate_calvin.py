@@ -282,7 +282,14 @@ def main(args):
     )
 
     if quantization_config is not None:
-        model_kwargs["device_map"] = "auto"
+        if device.type != "cuda":
+            raise ValueError(
+                "Quantized loading of the generalist requires a CUDA device. "
+                "Disable --generalist_load_in_4bit/--generalist_load_in_8bit or use a GPU-backed run."
+            )
+
+        device_index = 0 if device.index is None else device.index
+        model_kwargs["device_map"] = {"": f"cuda:{device_index}"}
 
     if quantization_config is None:
         model_kwargs["torch_dtype"] = generalist_dtype_map[dtype_key]
@@ -294,6 +301,14 @@ def main(args):
 
     if quantization_config is None:
         model.to(device=device, dtype=generalist_dtype_map[dtype_key])
+    else:
+        loaded_device = next(model.parameters()).device
+        if loaded_device.type != "cuda":
+            raise RuntimeError(
+                "Quantized generalist weights were loaded onto CPU. "
+                "bitsandbytes on this platform likely lacks GPU kernels. "
+                "Retry without quantization (omit --generalist_load_in_4bit/--generalist_load_in_8bit)."
+            )
 
     model.eval()
 
