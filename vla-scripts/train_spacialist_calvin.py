@@ -47,11 +47,35 @@ class DualSystem(torch.nn.Module):
         self.adapter = adapter
         self.action_tokenizer = action_tokenizer
 
+        target_device = self._infer_target_device()
+        if isinstance(self.fast_system, torch.nn.Module):
+            self.fast_system = self.fast_system.to(target_device)
+        if isinstance(self.adapter, torch.nn.Module):
+            self.adapter = self.adapter.to(target_device)
+        self.device = target_device
+
         # Set power = 3/4 to get faster convergence
-        self.ema_fast_system = EMA(self.fast_system, power = 0.75, beta = 0.9999, update_every = 1).to(fast_system.device)
+        self.ema_fast_system = EMA(
+            self.fast_system,
+            power = 0.75,
+            beta = 0.9999,
+            update_every = 1,
+        ).to(target_device)
 
         if freeze_slow:
             self.slow_system.requires_grad_(False)
+
+
+    def _infer_target_device(self) -> torch.device:
+        if isinstance(self.slow_system, torch.nn.Module):
+            try:
+                param = next(self.slow_system.parameters())
+                return param.device
+            except StopIteration:
+                pass
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
 
 
     def forward(self, batch):
