@@ -245,16 +245,33 @@ def main(args):
 
 
     # Load generalist policy
-    from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
-    quantization_config = None
-    processor = AutoProcessor.from_pretrained(args.generalist_path, trust_remote_code=True)
-    model = AutoModelForVision2Seq.from_pretrained(
-            args.generalist_path,
-            torch_dtype=torch.bfloat16,
-            quantization_config=quantization_config,
-            low_cpu_mem_usage=False,
-            trust_remote_code=True,
+    from transformers import AutoModelForVision2Seq, AutoProcessor
+
+    dtype_key = args.generalist_dtype.lower()
+
+    generalist_dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+
+    if dtype_key not in generalist_dtype_map:
+        raise ValueError(
+            f"Unsupported dtype '{args.generalist_dtype}'. Choose from {list(generalist_dtype_map.keys())}."
         )
+
+    processor = AutoProcessor.from_pretrained(args.generalist_path, trust_remote_code=True)
+
+    generalist_dtype = generalist_dtype_map[dtype_key]
+
+    model = AutoModelForVision2Seq.from_pretrained(
+        args.generalist_path,
+        trust_remote_code=True,
+        torch_dtype=generalist_dtype,
+        low_cpu_mem_usage=False,
+    )
+
+    model.to(device=device, dtype=generalist_dtype)
     model.eval()
 
     # Load specialist policy
@@ -402,7 +419,18 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--generalist_path", default="openvla7b", type=str)
+    parser.add_argument(
+        "--generalist_path",
+        default="Embodied-CoT/ecot-openvla-7b-bridge",
+        type=str,
+        help="Path or Hugging Face repo id of the generalist model.",
+    )
+    parser.add_argument(
+        "--generalist_dtype",
+        default="bfloat16",
+        type=str,
+        help="Floating point precision for the generalist (bfloat16, float16, float32).",
+    )
     parser.add_argument("--specialist_path", default="specialist_policy.pt", type=str)
     parser.add_argument("--calvin_path", default="./calvin", type=str)
     parser.add_argument("--log_dir", default="CALVIN_ABC-D", type=str)
