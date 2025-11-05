@@ -260,6 +260,21 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
         self._start_generalist_worker()
 
+    def _prepare_model_inputs(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+        """Move processor outputs to the target device without corrupting token ids."""
+
+        prepared: dict[str, torch.Tensor] = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                if value.dtype.is_floating_point:
+                    prepared[key] = value.to(self.device, dtype=torch.bfloat16)
+                else:
+                    prepared[key] = value.to(self.device)
+            else:
+                prepared[key] = value
+
+        return prepared
+
 
     def _generate_cot_text(self, cot_inputs: dict[str, torch.Tensor]) -> str:
         with torch.no_grad():
@@ -459,12 +474,12 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         depth_gripper = torch.from_numpy(obs["depth_obs"]['depth_gripper']).unsqueeze(0).to(self.device) - self.gripper_depth_min / (self.gripper_depth_max - self.gripper_depth_min)
 
         prompt = get_openvla_prompt(instruction)
-        action_inputs = self.processor(prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
+        action_inputs = self.processor(prompt, Image.fromarray(image))
         cot_prompt = get_openvla_cot_prompt(instruction)
-        cot_inputs = self.processor(cot_prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
+        cot_inputs = self.processor(cot_prompt, Image.fromarray(image))
 
-        action_inputs = {k: v for k, v in action_inputs.items()}
-        cot_inputs = {k: v for k, v in cot_inputs.items()}
+        action_inputs = self._prepare_model_inputs(action_inputs)
+        cot_inputs = self._prepare_model_inputs(cot_inputs)
         generalist_inputs = {"action": action_inputs, "cot": cot_inputs}
 
 
