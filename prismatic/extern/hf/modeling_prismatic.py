@@ -25,6 +25,7 @@ import torch.nn as nn
 import transformers
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 from transformers.modeling_outputs import ModelOutput
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
@@ -489,6 +490,33 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         return self.language_model._reorder_cache(*args, **kwargs)
 
 
+class _DisallowActionTokensProcessor(LogitsProcessor):
+    def __init__(self, action_start: int, vocab_size: int) -> None:
+        self.action_start = action_start
+        self.vocab_size = vocab_size
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if self.action_start < self.vocab_size:
+            scores[..., self.action_start : self.vocab_size] = -float("inf")
+        return scores
+
+
+class _AllowOnlyActionTokensProcessor(LogitsProcessor):
+    def __init__(self, action_start: int, vocab_size: int) -> None:
+        self.action_start = action_start
+        self.vocab_size = vocab_size
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if self.action_start <= 0:
+            return scores
+
+        if self.action_start > 0:
+            scores[..., : self.action_start] = -float("inf")
+        if self.vocab_size > self.action_start:
+            scores[..., self.vocab_size :] = -float("inf")
+        return scores
+
+
 class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     config_class: PretrainedConfig = OpenVLAConfig
 
@@ -502,28 +530,99 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         # Compute vocab size for de-tokenization -- revert added "multiple of"
         self.vocab_size = self.config.text_config.vocab_size - self.config.pad_to_multiple_of
+        self.action_token_start_idx = max(self.vocab_size - (config.n_action_bins + 1), 0)
 
     def predict_action(
         self, input_ids: Optional[torch.LongTensor] = None, unnorm_key: Optional[str] = None, **kwargs: str
-    ) -> np.ndarray:
-        """Thin wrapper around super().generate() that decodes predicted actions and de-normalizes them."""
+    ) -> Tuple[np.ndarray, torch.Tensor]:
+        """
+        Generate step-by-step reasoning followed by action tokens, returning both the decoded actions and
+        the final-layer hidden states associated with the action tokens.
+        """
 
-        # We need to add this special empty token ('') after the colon (':') token in "ASSISTANT:"
-        # in order for the predictions to match the training configuration and be accurate.
-        input_ids = torch.cat(
-            (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
+        cot_config = kwargs.pop("cot_config", None)
+
+        attention_mask = kwargs.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(input_ids.device)
+            if attention_mask.dtype != torch.long:
+                attention_mask = attention_mask.to(torch.long)
+            valid_tokens = int(attention_mask[0].sum().item())
+            input_ids = input_ids[:, :valid_tokens]
+            attention_mask = attention_mask[:, :valid_tokens]
+        else:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+
+        mask_dtype = attention_mask.dtype
+
+        # Append special empty token to mirror training-time formatting (ASSISTANT: )
+        special_token = torch.tensor([[29871]], device=input_ids.device, dtype=input_ids.dtype)
+        input_ids = torch.cat((input_ids, special_token), dim=-1)
+        ones_mask = torch.ones((attention_mask.shape[0], 1), dtype=mask_dtype, device=attention_mask.device)
+        attention_mask = torch.cat((attention_mask, ones_mask), dim=-1)
+
+        base_kwargs = dict(kwargs)
+        base_kwargs["attention_mask"] = attention_mask
+
+        if cot_config and cot_config.get("enabled", False):
+            thought_kwargs = dict(base_kwargs)
+            thought_kwargs.pop("streamer", None)
+
+            processors = self._compose_logits_processors(
+                base_kwargs.get("logits_processor"),
+                _DisallowActionTokensProcessor(self.action_token_start_idx, self.vocab_size),
+            )
+            thought_kwargs["logits_processor"] = processors
+            thought_kwargs["return_dict_in_generate"] = True
+            thought_kwargs["max_new_tokens"] = cot_config.get("max_new_tokens", 64)
+
+            thought_outputs = self.generate(input_ids, **thought_kwargs)
+            thought_sequences = thought_outputs.sequences
+
+            new_tokens = thought_sequences[:, input_ids.shape[-1] :]
+            tokenizer = cot_config.get("tokenizer")
+            callback = cot_config.get("callback")
+            if tokenizer is not None and callback is not None and new_tokens.numel() > 0:
+                thought_text = tokenizer.decode(new_tokens[0].tolist(), skip_special_tokens=True)
+                callback(thought_text)
+
+            input_ids = thought_sequences
+            attention_mask = torch.ones_like(input_ids, dtype=mask_dtype, device=input_ids.device)
+
+            action_prefix = cot_config.get("action_prefix", "\nAction:")
+            if action_prefix and tokenizer is not None:
+                prefix_ids = tokenizer(
+                    action_prefix, return_tensors="pt", add_special_tokens=False
+                ).input_ids.to(device=input_ids.device, dtype=input_ids.dtype)
+                if prefix_ids.numel() > 0 and not self._sequence_has_suffix(input_ids, prefix_ids):
+                    input_ids = torch.cat((input_ids, prefix_ids), dim=-1)
+                    attention_mask = torch.ones_like(input_ids, dtype=mask_dtype, device=input_ids.device)
+
+            base_kwargs["attention_mask"] = attention_mask
+
+        action_processors = self._compose_logits_processors(
+            base_kwargs.get("logits_processor"),
+            _AllowOnlyActionTokensProcessor(self.action_token_start_idx, self.vocab_size),
         )
+        action_kwargs = dict(base_kwargs)
+        action_kwargs["logits_processor"] = action_processors
+        action_kwargs["return_dict_in_generate"] = True
+        action_kwargs["max_new_tokens"] = self.get_action_dim(unnorm_key)
 
-        # Run VLA inference
-        generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(unnorm_key), **kwargs)
+        streamer = action_kwargs.get("streamer")
+        if streamer is not None and hasattr(streamer, "start"):
+            streamer.start()
 
-        # Extract predicted action tokens and translate into (normalized) continuous actions
+        action_outputs = self.generate(input_ids, **action_kwargs)
+        generated_ids = action_outputs.sequences
+
+        final_attention_mask = torch.ones_like(generated_ids, dtype=mask_dtype, device=generated_ids.device)
+
         predicted_action_token_ids = generated_ids[0, -self.get_action_dim(unnorm_key) :].cpu().numpy()
         discretized_actions = self.vocab_size - predicted_action_token_ids
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized_actions]
 
-        # Unnormalize actions
         action_norm_stats = self.get_action_stats(unnorm_key)
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
@@ -533,7 +632,44 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             normalized_actions,
         )
 
-        return actions
+        with torch.inference_mode():
+            forward_outputs = super().forward(
+                input_ids=generated_ids,
+                attention_mask=final_attention_mask,
+                pixel_values=action_kwargs.get("pixel_values"),
+                output_hidden_states=True,
+                use_cache=False,
+                return_dict=True,
+            )
+
+        last_hidden_states = forward_outputs.hidden_states[-1][:, self.vision_backbone.num_patches :, :]
+
+        return actions, last_hidden_states
+
+    @staticmethod
+    def _compose_logits_processors(
+        base: Optional[Union[LogitsProcessorList, List[LogitsProcessor]]],
+        *additional: LogitsProcessor,
+    ) -> LogitsProcessorList:
+        processors = LogitsProcessorList()
+        if base is not None:
+            if isinstance(base, LogitsProcessorList):
+                processors.extend(base)
+            else:
+                processors.extend(base)
+        for processor in additional:
+            processors.append(processor)
+        return processors
+
+    @staticmethod
+    def _sequence_has_suffix(sequence: torch.LongTensor, suffix: torch.LongTensor) -> bool:
+        if suffix.numel() == 0:
+            return True
+        if sequence.shape[0] != suffix.shape[0]:
+            suffix = suffix.expand(sequence.shape[0], -1)
+        if sequence.shape[-1] < suffix.shape[-1]:
+            return False
+        return torch.equal(sequence[:, -suffix.shape[-1] :], suffix)
 
     @staticmethod
     def _check_unnorm_key(norm_stats: Dict[str, Dict[str, Any]], unnorm_key: Optional[str]) -> str:

@@ -11,7 +11,7 @@ from PIL import Image
 from dataclasses import dataclass
 from einops import rearrange
 
-from typing import Optional
+from typing import Callable, Optional
 from transformers.generation.streamers import BaseStreamer
 
 
@@ -172,7 +172,11 @@ class TimingAggregator:
         return 1.0 / mean
 
 def get_openvla_prompt(instruction: str, tokenized_action: str = None) -> str:
-    return f"In: What action should the robot take to {instruction.lower()}?\nOut:"
+    return (
+        "In: You are a helpful robotics assistant. Think step by step about how to "
+        f"{instruction.lower()}. First, write your reasoning in a Thought section, then "
+        "provide the discrete action tokens in an Action section.\nOut: Thought:"
+    )
 
 
 class DualSystemCalvinEvaluation(CalvinBaseModel):
@@ -246,6 +250,9 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
         self._specialist_exec_counter = 0
 
+        self._cot_enabled = True
+        self._cot_max_new_tokens = 96
+
         self._start_generalist_worker()
 
         
@@ -270,9 +277,19 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                 generalist_start = time.perf_counter()
 
                 streamer = ActionTokenTimingStreamer(device=self.device)
-                streamer.start()
+
+                cot_config = None
+                if self._cot_enabled:
+                    cot_config = {
+                        "enabled": True,
+                        "max_new_tokens": self._cot_max_new_tokens,
+                        "tokenizer": self.processor.tokenizer,
+                        "callback": self._make_cot_logger(step_index),
+                        "action_prefix": "\nAction:",
+                    }
+
                 action, hidden_states = self.dual_impl.slow_system.predict_action(
-                    streamer=streamer, do_sample=False, **inputs
+                    streamer=streamer, do_sample=False, cot_config=cot_config, **inputs
                 )
                 streamer.finalize()
                 timing_metrics = streamer.get_metrics()
@@ -499,6 +516,25 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self._specialist_exec_counter += 1
 
         return action_prediction
+
+    def _make_cot_logger(self, step_index: int) -> Callable[[str], None]:
+        prefix = f"[CoT][Step {step_index}]"
+
+        def _logger(text: str) -> None:
+            stripped = text.strip()
+            if not stripped:
+                return
+
+            lines = stripped.splitlines()
+            if not lines:
+                return
+
+            print(f"{prefix} {lines[0]}")
+            indent = " " * (len(prefix) + 1)
+            for line in lines[1:]:
+                print(f"{indent}{line}")
+
+        return _logger
     def record_control_cycle(self, duration: float) -> None:
         self._control_stats.update(duration)
 
