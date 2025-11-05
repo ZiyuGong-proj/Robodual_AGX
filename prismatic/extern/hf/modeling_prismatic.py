@@ -562,10 +562,16 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         attention_mask = torch.cat((attention_mask, ones_mask), dim=-1)
 
         base_kwargs = dict(kwargs)
+        # ``cot_config`` is consumed entirely within this method when enabled.  Some call sites
+        # (especially ones that forward dictionaries) may still leave the key in ``kwargs`` even
+        # after we pop it above, which leads to ``generate`` receiving an unexpected argument.
+        # Remove it defensively from any derived kwargs before invoking ``generate``.
+        base_kwargs.pop("cot_config", None)
         base_kwargs["attention_mask"] = attention_mask
 
         if cot_config and cot_config.get("enabled", False):
             thought_kwargs = dict(base_kwargs)
+            thought_kwargs.pop("cot_config", None)
             thought_kwargs.pop("streamer", None)
 
             processors = self._compose_logits_processors(
@@ -605,6 +611,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             _AllowOnlyActionTokensProcessor(self.action_token_start_idx, self.vocab_size),
         )
         action_kwargs = dict(base_kwargs)
+        action_kwargs.pop("cot_config", None)
         action_kwargs["logits_processor"] = action_processors
         action_kwargs["return_dict_in_generate"] = True
         action_kwargs["max_new_tokens"] = self.get_action_dim(unnorm_key)
