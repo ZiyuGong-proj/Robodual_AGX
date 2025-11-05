@@ -542,6 +542,13 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         cot_config = kwargs.pop("cot_config", None)
 
+        # ``kwargs`` may be forwarded from higher level helpers that reuse the same dictionary
+        # instance for multiple ``predict_action`` invocations.  Even though we ``pop`` the
+        # argument above, make sure we don't accidentally retain a reference to the original
+        # dictionary that still contains ``cot_config`` when constructing derived kwargs below.
+        # Always materialize a filtered copy that drops the helper-only key.
+        kwargs = {key: value for key, value in kwargs.items() if key != "cot_config"}
+
         attention_mask = kwargs.get("attention_mask")
         if attention_mask is not None:
             attention_mask = attention_mask.to(input_ids.device)
