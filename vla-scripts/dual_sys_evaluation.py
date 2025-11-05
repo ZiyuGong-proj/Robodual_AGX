@@ -11,7 +11,7 @@ from PIL import Image
 from dataclasses import dataclass
 from einops import rearrange
 
-from typing import Optional
+from typing import Any, Optional
 from transformers.generation.streamers import BaseStreamer
 
 
@@ -175,6 +175,15 @@ def get_openvla_prompt(instruction: str, tokenized_action: str = None) -> str:
     return f"In: What action should the robot take to {instruction.lower()}?\nOut:"
 
 
+def get_openvla_cot_prompt(instruction: str) -> str:
+    return (
+        "In: Consider the scene and task described below.\n"
+        f"Task: {instruction.lower()}.\n"
+        "Describe the robot's reasoning process step by step before issuing low-level actions.\n"
+        "Reasoning:"
+    )
+
+
 class DualSystemCalvinEvaluation(CalvinBaseModel):
     def __init__(self, model, processor, action_tokenizer):
         super().__init__()
@@ -234,8 +243,11 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self._specialist_stats = TimingAggregator()
         self._control_stats = TimingAggregator()
 
+        self._cot_max_new_tokens = 128
+        self._last_cot_text: str = ""
+
         # Threading primitives for asynchronous generalist execution
-        self._generalist_queue: "queue.Queue[tuple[int, int, int, dict[str, torch.Tensor]]]" = queue.Queue(maxsize=1)
+        self._generalist_queue: "queue.Queue[tuple[int, int, int, dict[str, Any]]]" = queue.Queue(maxsize=1)
         self._generalist_ready_event = threading.Event()
         self._generalist_lock = threading.Lock()
         self._generalist_thread: Optional[threading.Thread] = None
@@ -248,7 +260,30 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
         self._start_generalist_worker()
 
-        
+
+    def _generate_cot_text(self, cot_inputs: dict[str, torch.Tensor]) -> str:
+        with torch.no_grad():
+            generation = self.dual_impl.slow_system.generate(
+                **cot_inputs,
+                max_new_tokens=self._cot_max_new_tokens,
+                do_sample=False,
+            )
+
+        if hasattr(generation, "sequences"):
+            sequences = generation.sequences
+        else:
+            sequences = generation
+
+        input_len = cot_inputs["input_ids"].shape[1]
+        generated_ids = sequences[:, input_len:]
+        if generated_ids.numel() == 0:
+            return ""
+
+        tokenizer = self.processor.tokenizer
+        cot_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        return cot_text.strip()
+
+
     def _start_generalist_worker(self) -> None:
         if self._generalist_thread is not None and self._generalist_thread.is_alive():
             return
@@ -267,12 +302,14 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                     break
 
                 context_id, request_id, step_index, inputs = payload
+                action_inputs = inputs.get("action", {})
+                cot_inputs = inputs.get("cot")
                 generalist_start = time.perf_counter()
 
                 streamer = ActionTokenTimingStreamer(device=self.device)
                 streamer.start()
                 action, hidden_states = self.dual_impl.slow_system.predict_action(
-                    streamer=streamer, do_sample=False, **inputs
+                    streamer=streamer, do_sample=False, **action_inputs
                 )
                 streamer.finalize()
                 timing_metrics = streamer.get_metrics()
@@ -289,6 +326,17 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                 action = torch.tensor(action).to(hidden_states.device).unsqueeze(0)
                 action = rearrange(action, "b (f d) -> b f d", f=self.temporal_size)[:, :, :7]
 
+                cot_text = ""
+                if cot_inputs is not None:
+                    try:
+                        cot_text = self._generate_cot_text(cot_inputs)
+                    except Exception as exc:  # pragma: no cover - best-effort logging
+                        cot_text = ""
+                        print(f"[Generalist CoT][Step {step_index}] Failed to generate reasoning: {exc}")
+                    else:
+                        if cot_text:
+                            print(f"[Generalist CoT][Step {step_index}] {cot_text}")
+
                 duration = time.perf_counter() - generalist_start
                 with self._generalist_lock:
                     if context_id != self._generalist_context:
@@ -301,6 +349,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                     self.hidden_states = hidden_states
                     self._pending_generalist = False
                     self._generalist_stats.update(duration)
+                    self._last_cot_text = cot_text
                 self._generalist_ready_event.set()
                 self._generalist_queue.task_done()
 
@@ -319,7 +368,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self._generalist_thread.join(timeout=1.0)
         self._generalist_thread = None
 
-    def _submit_generalist_request(self, inputs: dict[str, torch.Tensor], step: int, *, block: bool) -> bool:
+    def _submit_generalist_request(self, inputs: dict[str, Any], step: int, *, block: bool) -> bool:
         with self._generalist_lock:
             if self._pending_generalist:
                 return False
@@ -342,7 +391,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                 self._pending_generalist = False
             return False
 
-    def _maybe_request_generalist(self, inputs: dict[str, torch.Tensor], step: int, wait: bool = False) -> None:
+    def _maybe_request_generalist(self, inputs: dict[str, Any], step: int, wait: bool = False) -> None:
         success = self._submit_generalist_request(inputs, step, block=wait)
         if wait:
             while True:
@@ -385,6 +434,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             self.hidden_states = None
             self.action = None
             self._pending_generalist = False
+            self._last_cot_text = ""
         self._generalist_ready_event.clear()
         self._specialist_exec_counter = 0
 
@@ -409,17 +459,23 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         depth_gripper = torch.from_numpy(obs["depth_obs"]['depth_gripper']).unsqueeze(0).to(self.device) - self.gripper_depth_min / (self.gripper_depth_max - self.gripper_depth_min)
 
         prompt = get_openvla_prompt(instruction)
-        inputs = self.processor(prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
+        action_inputs = self.processor(prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
+        cot_prompt = get_openvla_cot_prompt(instruction)
+        cot_inputs = self.processor(cot_prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
+
+        action_inputs = {k: v for k, v in action_inputs.items()}
+        cot_inputs = {k: v for k, v in cot_inputs.items()}
+        generalist_inputs = {"action": action_inputs, "cot": cot_inputs}
 
 
         with self._generalist_lock:
             generalist_ready = self.hidden_states is not None
 
         if not generalist_ready:
-            self._maybe_request_generalist(inputs, step, wait=True)
+            self._maybe_request_generalist(generalist_inputs, step, wait=True)
         #elif (self._specialist_exec_counter + 1) % self.temporal_size == 0:
         elif (self._specialist_exec_counter + 1) % self._generalist_refresh_interval == 0:
-            self._maybe_request_generalist(inputs, step, wait=False)
+            self._maybe_request_generalist(generalist_inputs, step, wait=False)
 
         with self._generalist_lock:
             current_action = self.action
@@ -447,7 +503,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             self.obs_buffer = image
 
         prev_img = self.processor.image_processor.apply_transform(Image.fromarray(self.obs_buffer))[:3].unsqueeze(0).to(self.device)
-        obs = (inputs["pixel_values"][:,:3].to(torch.float), prev_img)
+        obs = (action_inputs["pixel_values"][:, :3].to(torch.float), prev_img)
 
 
         hist_action = torch.zeros((1,4,7)).to(self.device)
