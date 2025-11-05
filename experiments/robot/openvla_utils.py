@@ -161,7 +161,11 @@ def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, c
             f"{OPENVLA_V01_SYSTEM_PROMPT} USER: What action should the robot take to {task_label.lower()}? ASSISTANT:"
         )
     else:  # OpenVLA
-        prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+        prompt = (
+            "In: You are a helpful robotics assistant. Think step by step about how to "
+            f"{task_label.lower()}. First, write your reasoning in a Thought section, then "
+            "provide the discrete action tokens in an Action section.\nOut: Thought:"
+        )
 
     # Process inputs.
     inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
@@ -207,12 +211,16 @@ def get_vla_latent_action(vla, processor, base_vla_name, obs, task_label, unnorm
             f"{OPENVLA_V01_SYSTEM_PROMPT} USER: What action should the robot take to {task_label.lower()}? ASSISTANT:"
         )
     else:  # OpenVLA
-        prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+        prompt = (
+            "In: You are a helpful robotics assistant. Think step by step about how to "
+            f"{task_label.lower()}. First, write your reasoning in a Thought section, then "
+            "provide the discrete action tokens in an Action section.\nOut: Thought:"
+        )
 
     # Process inputs.
     inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
 
     # Get latent action.
-    action = vla.predict_latent_action(**inputs, unnorm_key=unnorm_key, do_sample=False)#, top_p=0.1, temperature=0.2)
+    action = vla.predict_latent_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
 
     return action
