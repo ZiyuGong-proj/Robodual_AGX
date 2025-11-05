@@ -26,6 +26,10 @@ import transformers
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
+from transformers.generation.stopping_criteria import (
+    StoppingCriteria,
+    StoppingCriteriaList,
+)
 from transformers.modeling_outputs import ModelOutput
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
@@ -517,6 +521,15 @@ class _AllowOnlyActionTokensProcessor(LogitsProcessor):
         return scores
 
 
+class _ActionLengthStoppingCriteria(StoppingCriteria):
+    def __init__(self, start_length: int, max_action_tokens: int) -> None:
+        self.start_length = start_length
+        self.max_action_tokens = max_action_tokens
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> bool:  # type: ignore[override]
+        return input_ids.shape[-1] - self.start_length >= self.max_action_tokens
+
+
 class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     config_class: PretrainedConfig = OpenVLAConfig
 
@@ -621,7 +634,17 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_kwargs.pop("cot_config", None)
         action_kwargs["logits_processor"] = action_processors
         action_kwargs["return_dict_in_generate"] = True
-        action_kwargs["max_new_tokens"] = self.get_action_dim(unnorm_key)
+
+        action_length = self.get_action_dim(unnorm_key)
+        action_start_length = input_ids.shape[-1]
+        stopping_criteria = self._compose_stopping_criteria(
+            base_kwargs.get("stopping_criteria"),
+            _ActionLengthStoppingCriteria(action_start_length, action_length),
+        )
+        action_kwargs["stopping_criteria"] = stopping_criteria
+        action_kwargs["max_new_tokens"] = max(
+            action_kwargs.get("max_new_tokens", 0), action_length
+        )
 
         streamer = action_kwargs.get("streamer")
         if streamer is not None and hasattr(streamer, "start"):
@@ -674,6 +697,21 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         for processor in additional:
             processors.append(processor)
         return processors
+
+    @staticmethod
+    def _compose_stopping_criteria(
+        base: Optional[Union[StoppingCriteriaList, List[StoppingCriteria]]],
+        *additional: StoppingCriteria,
+    ) -> StoppingCriteriaList:
+        criteria = StoppingCriteriaList()
+        if base is not None:
+            if isinstance(base, StoppingCriteriaList):
+                criteria.extend(base)
+            else:
+                criteria.extend(base)
+        for stop in additional:
+            criteria.append(stop)
+        return criteria
 
     @staticmethod
     def _sequence_has_suffix(sequence: torch.LongTensor, suffix: torch.LongTensor) -> bool:
