@@ -288,9 +288,30 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                         "action_prefix": "\nAction:",
                     }
 
-                action, hidden_states = self.dual_impl.slow_system.predict_action(
-                    streamer=streamer, do_sample=False, cot_config=cot_config, **inputs
-                )
+                predict_kwargs = dict(inputs)
+                predict_kwargs.update({"streamer": streamer, "do_sample": False})
+                if cot_config is not None:
+                    predict_kwargs["cot_config"] = cot_config
+
+                try:
+                    action, hidden_states = self.dual_impl.slow_system.predict_action(
+                        **predict_kwargs
+                    )
+                except ValueError as exc:
+                    if cot_config is not None and "cot_config" in str(exc):
+                        print(
+                            "[Warning] Model does not accept `cot_config`; disabling chain-of-thought logging."
+                        )
+                        self._cot_enabled = False
+                        streamer.finalize()
+                        streamer = ActionTokenTimingStreamer(device=self.device)
+                        predict_kwargs = dict(inputs)
+                        predict_kwargs.update({"streamer": streamer, "do_sample": False})
+                        action, hidden_states = self.dual_impl.slow_system.predict_action(
+                            **predict_kwargs
+                        )
+                    else:
+                        raise
                 streamer.finalize()
                 timing_metrics = streamer.get_metrics()
                 if timing_metrics is not None:
