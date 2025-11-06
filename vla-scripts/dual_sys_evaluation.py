@@ -237,6 +237,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         ########################
         self.ttft_records = []
         self.tpot_records = []
+        self.token_records = []
         ########################
 
         self._generalist_stats = TimingAggregator()
@@ -276,13 +277,45 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         return prepared
 
 
-    def _generate_cot_text(self, cot_inputs: dict[str, torch.Tensor]) -> str:
+    def _record_generalist_latency(
+        self,
+        metrics: Optional[dict[str, float]],
+        step_index: int,
+        source: str,
+    ) -> None:
+        if metrics is None:
+            return
+
+        ttft = float(metrics.get("ttft", 0.0))
+        tpot = float(metrics.get("tpot", 0.0))
+        token_count = int(metrics.get("token_count", 0))
+
+        with self._generalist_lock:
+            self.ttft_records.append(ttft)
+            self.tpot_records.append(tpot)
+            self.token_records.append(token_count)
+
+        print(
+            f"[Latency][System-2][{source}] Step {step_index}: "
+            f"TTFT={ttft:.4f}s, TPOT={tpot:.4f}s, Tokens={token_count}"
+        )
+
+    def _generate_cot_text(
+        self, cot_inputs: dict[str, torch.Tensor]
+    ) -> tuple[str, Optional[dict[str, float]]]:
+        streamer = ActionTokenTimingStreamer(device=self.device)
+        streamer.start()
+
         with torch.no_grad():
             generation = self.dual_impl.slow_system.generate(
                 **cot_inputs,
                 max_new_tokens=self._cot_max_new_tokens,
                 do_sample=False,
+                streamer=streamer,
             )
+
+        streamer.finalize()
+        metrics = streamer.get_metrics()
 
         if hasattr(generation, "sequences"):
             sequences = generation.sequences
@@ -292,11 +325,11 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         input_len = cot_inputs["input_ids"].shape[1]
         generated_ids = sequences[:, input_len:]
         if generated_ids.numel() == 0:
-            return ""
+            return "", metrics
 
         tokenizer = self.processor.tokenizer
         cot_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        return cot_text.strip()
+        return cot_text.strip(), metrics
 
 
     def _start_generalist_worker(self) -> None:
@@ -328,29 +361,24 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
                 )
                 streamer.finalize()
                 timing_metrics = streamer.get_metrics()
-                if timing_metrics is not None:
-                    ttft = timing_metrics["ttft"]
-                    tpot = timing_metrics["tpot"]
-                    with self._generalist_lock:
-                        self.ttft_records.append(ttft)
-                        self.tpot_records.append(tpot)
-                    print(
-                        f"[Latency][System-2] Step {step_index}: TTFT={ttft:.4f}s, TPOT={tpot:.4f}s, Tokens={timing_metrics['token_count']}"
-                    )
+                self._record_generalist_latency(timing_metrics, step_index, "Action")
 
                 action = torch.tensor(action).to(hidden_states.device).unsqueeze(0)
                 action = rearrange(action, "b (f d) -> b f d", f=self.temporal_size)[:, :, :7]
 
                 cot_text = ""
+                cot_metrics = None
                 if cot_inputs is not None:
                     try:
-                        cot_text = self._generate_cot_text(cot_inputs)
+                        cot_text, cot_metrics = self._generate_cot_text(cot_inputs)
                     except Exception as exc:  # pragma: no cover - best-effort logging
                         cot_text = ""
+                        cot_metrics = None
                         print(f"[Generalist CoT][Step {step_index}] Failed to generate reasoning: {exc}")
                     else:
                         if cot_text:
                             print(f"[Generalist CoT][Step {step_index}] {cot_text}")
+                    self._record_generalist_latency(cot_metrics, step_index, "CoT")
 
                 duration = time.perf_counter() - generalist_start
                 with self._generalist_lock:
@@ -591,8 +619,10 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
         avg_ttft = sum(self.ttft_records) / len(self.ttft_records)
         avg_tpot = sum(self.tpot_records) / len(self.tpot_records) if self.tpot_records else 0.0
+        avg_tokens = sum(self.token_records) / len(self.token_records) if self.token_records else 0.0
         print(
-            f"[Latency][System-2] Average TTFT={avg_ttft:.4f}s, Average TPOT={avg_tpot:.4f}s over {len(self.ttft_records)} runs"
+            f"[Latency][System-2] Average TTFT={avg_ttft:.4f}s, Average TPOT={avg_tpot:.4f}s, "
+            f"Average Tokens={avg_tokens:.2f} over {len(self.ttft_records)} runs"
         )
 
     def get_latency_aggregates(self):
@@ -601,6 +631,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             float(len(self.ttft_records)),
             float(sum(self.tpot_records)),
             float(len(self.tpot_records)),
+            float(sum(self.token_records)),
         )
     ###################################################
 
