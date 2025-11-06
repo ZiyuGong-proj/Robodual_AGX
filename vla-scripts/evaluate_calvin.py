@@ -318,7 +318,9 @@ def main(args):
     )).float().mean().to(device)
 
     ##################################
-    local_latency_stats = torch.tensor(eva.get_latency_aggregates(), device=device, dtype=torch.float64)
+    local_latency_stats = torch.tensor(
+        eva.get_latency_aggregates(), device=device, dtype=torch.float64
+    )
     ###############################
 
     #add3
@@ -348,11 +350,13 @@ def main(args):
         if gathered_latency.numel() == 0:
             total_ttft_sum = total_ttft_count = 0.0
             total_tpot_sum = total_tpot_count = 0.0
+            total_token_sum = 0.0
         else:
             total_ttft_sum = gathered_latency[:, 0].sum().item()
             total_ttft_count = gathered_latency[:, 1].sum().item()
             total_tpot_sum = gathered_latency[:, 2].sum().item()
             total_tpot_count = gathered_latency[:, 3].sum().item()
+            total_token_sum = gathered_latency[:, 4].sum().item()
 
         if total_ttft_count > 0:
             print(
@@ -367,6 +371,12 @@ def main(args):
             )
         else:
             print("[Latency][System-1] No TPOT measurements were recorded.")
+        if total_ttft_count > 0:
+            print(
+                f"[Latency][System-1] Average tokens: {total_token_sum / total_ttft_count:.2f} over {int(total_ttft_count)} runs"
+            )
+        else:
+            print("[Latency][System-1] No token measurements were recorded.")
         ####################################################
         
 
